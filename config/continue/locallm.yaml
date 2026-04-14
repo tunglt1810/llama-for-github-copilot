@@ -1,0 +1,38 @@
+# Continue.dev VS Code extension configuration
+# Install: cp config/continue/config.yaml ~/.continue/config.yaml
+#          or: make install-continue
+#
+# Extension: https://marketplace.visualstudio.com/items?itemName=Continue.continue
+
+name: 'Local LLM (Qwen3.5-9B Reasoning)'
+version: '1'
+
+models:
+  - name: 'Qwen3.5-9B Reasoning (Local)'
+    provider: openai
+    model: qwen3.5-9b-reasoning
+    apiBase: http://127.0.0.1:18888/v1
+    apiKey: local
+    systemMessage: |
+      You are an expert software engineer. Use structured step-by-step reasoning
+      inside <think> tags before giving your final answer.
+
+tabAutocomplete:
+  model:
+    name: 'Qwen3.5-9B Autocomplete'
+    provider: openai
+    model: qwen3.5-9b-reasoning
+    apiBase: http://127.0.0.1:18888/v1
+    apiKey: local
+  maxPromptTokens: 1024
+  multilineCompletions: 'auto'
+  debounceDelay: 300
+
+context:
+  - provider: code
+  - provider: docs
+  - provider: diff
+  - provider: terminal
+  - provider: problems
+  - provider: folder
+  - provider: codebase
