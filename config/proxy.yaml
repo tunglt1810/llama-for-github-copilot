@@ -1,20 +1,20 @@
 # Proxy configuration for the Go-based Ollama-compatible proxy.
-# Bạn có thể chỉnh sửa giá trị ở đây và ghi đè bằng environment variables.
+# You can edit values here and override them with environment variables.
 
 host: 127.0.0.1
 port: 11434
 run_mode: llama-server-wrapper
-ollama_version: '0.20.7' # Phiên bản Ollama mà proxy báo cáo qua /api/version
+ollama_version: '0.20.7' # Ollama version that the proxy reports via /api/version
 upstream_base: ''
 model_name: ''
 model_size: 0
-llama_server_host: 127.0.0.1
-llama_server_port: 18888
 llama_server_args:
+  host: 127.0.0.1
+  port: 50000
   n-gpu-layers: '99'
-  ctx-size: '262144'
-  parallel: '1'
-  cache-type-k: 'q8_0'
-  cache-type-v: 'q8_0'
+  ctx-per-slot: 262144 # Parameter representing the context window of one processing slot; on start the server computes ctx-size = ctx-per-slot * parallel.
+  parallel: 4
+  cache-type-k: 'q4_0'
+  cache-type-v: 'q4_0'
   flash-attn: 'auto'
   embedding: 'true'

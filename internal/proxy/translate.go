@@ -10,9 +10,9 @@ import (
 	"time"
 )
 
-// ─── Helpers dùng chung ───────────────────────────────────────────────────────
+// ─── Common helpers ───────────────────────────────────────────────────────
 
-// marshalBody serialise v thành JSON và bọc trong ReadCloser phù hợp với http.Request.Body.
+// marshalBody serializes v into JSON and wraps it in an io.ReadCloser suitable for http.Request.Body.
 func marshalBody(v any) (io.ReadCloser, int64, error) {
 	data, err := json.Marshal(v)
 	if err != nil {
@@ -21,15 +21,15 @@ func marshalBody(v any) (io.ReadCloser, int64, error) {
 	return io.NopCloser(bytes.NewReader(data)), int64(len(data)), nil
 }
 
-// toOpenAIContent chuyển đổi text và images thành json.RawMessage phù hợp với OpenAI format.
-// Nếu không có images: trả về JSON string.
-// Nếu có images: trả về JSON array of content parts (text + image_url).
+// toOpenAIContent converts text and images into a json.RawMessage compatible with the OpenAI format.
+// If there are no images: returns a JSON string.
+// If there are images: returns a JSON array of content parts (text + image_url).
 func toOpenAIContent(text string, images []string) json.RawMessage {
 	if len(images) == 0 {
 		b, _ := json.Marshal(text)
 		return json.RawMessage(b)
 	}
-	// Dùng anonymous struct để tránh import thêm
+	// Use anonymous structs to avoid adding extra imports
 	type textPart struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
@@ -47,7 +47,7 @@ func toOpenAIContent(text string, images []string) json.RawMessage {
 	}
 	for _, img := range images {
 		url := img
-		// Nếu chưa có data URL prefix thì thêm vào
+		// If the data URL prefix is missing, add it
 		if !strings.HasPrefix(img, "data:") {
 			url = "data:image/png;base64," + img
 		}
@@ -57,18 +57,18 @@ func toOpenAIContent(text string, images []string) json.RawMessage {
 	return json.RawMessage(b)
 }
 
-// extractTextContent lấy nội dung text từ OpenAI content field (json.RawMessage).
-// Hỗ trợ cả dạng string và dạng array of content parts.
+// extractTextContent extracts text content from an OpenAI content field (json.RawMessage).
+// Supports both a string and an array of content parts.
 func extractTextContent(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}
-	// Thử string trước
+	// Try parsing as a string first
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
 		return s
 	}
-	// Thử array of parts — lấy tất cả text parts
+	// Then try an array of parts — collect all text parts
 	var parts []struct {
 		Type string `json:"type"`
 		Text string `json:"text,omitempty"`
@@ -85,14 +85,14 @@ func extractTextContent(raw json.RawMessage) string {
 	return ""
 }
 
-// ollamaFormatToOpenAI chuyển đổi Ollama format field sang OpenAI response_format.
+// ollamaFormatToOpenAI converts the Ollama 'format' field to OpenAI 'response_format'.
 // "json" → {"type":"json_object"}
 // JSON schema object → {"type":"json_schema","json_schema":<schema>}
 func ollamaFormatToOpenAI(format json.RawMessage) *openAIResponseFormat {
 	if len(format) == 0 {
 		return nil
 	}
-	// Kiểm tra xem có phải là string "json" không
+	// Check whether it is the string "json"
 	var s string
 	if err := json.Unmarshal(format, &s); err == nil {
 		if s == "json" {
@@ -100,13 +100,13 @@ func ollamaFormatToOpenAI(format json.RawMessage) *openAIResponseFormat {
 		}
 		return nil
 	}
-	// Là JSON object (JSON schema) → dùng json_schema type
+	// It's a JSON object (JSON schema) → use json_schema type
 	return &openAIResponseFormat{Type: "json_schema", Schema: format}
 }
 
 // ─── Chat: Ollama → OpenAI ────────────────────────────────────────────────────
 
-// ollamaToOpenAI chuyển đổi Ollama POST /api/chat request thành OpenAI
+// ollamaToOpenAI converts an Ollama POST /api/chat request into an OpenAI
 // POST /v1/chat/completions request body.
 func ollamaToOpenAI(req *ChatRequest) *openAIChatRequest {
 	stream := true
@@ -119,15 +119,15 @@ func ollamaToOpenAI(req *ChatRequest) *openAIChatRequest {
 		Stream: stream,
 	}
 
-	// Chuyển đổi messages — hỗ trợ images, tool_calls, tool role
+	// Convert messages — supports images, tool_calls, and tool role
 	out.Messages = make([]openAIMessage, 0, len(req.Messages))
 	for _, m := range req.Messages {
 		msg := openAIMessage{
 			Role:    m.Role,
 			Content: toOpenAIContent(m.Content, m.Images),
 		}
-		// Chuyển Ollama tool_calls (arguments là json.RawMessage object) sang
-		// OpenAI tool_calls (arguments là JSON-encoded string)
+		// Convert Ollama tool_calls (arguments are json.RawMessage objects) into
+		// OpenAI tool_calls (arguments are JSON-encoded strings)
 		if len(m.ToolCalls) > 0 {
 			msg.ToolCalls = make([]openAIToolCall, len(m.ToolCalls))
 			for i, tc := range m.ToolCalls {
@@ -143,13 +143,13 @@ func ollamaToOpenAI(req *ChatRequest) *openAIChatRequest {
 					},
 				}
 			}
-			// Khi có tool_calls, content thường là null/empty
+			// When there are tool_calls, content is typically null/empty
 			msg.Content = toOpenAIContent("", nil)
 		}
-		// Xử lý role "tool" — map tool_name sang name field
+		// Handle role "tool" — map tool_name to the name field
 		if m.Role == "tool" && m.ToolName != "" {
 			msg.Name = m.ToolName
-			// Dùng tool_name làm fake tool_call_id vì Ollama không có field này
+			// Use tool_name as a fake tool_call_id because Ollama doesn't provide this field
 			msg.ToolCallID = "call_" + m.ToolName
 		}
 		out.Messages = append(out.Messages, msg)
@@ -163,7 +163,7 @@ func ollamaToOpenAI(req *ChatRequest) *openAIChatRequest {
 		out.Seed = o.Seed
 	}
 
-	// Chuyển tools
+	// Convert tools
 	if len(req.Tools) > 0 {
 		out.Tools = make([]openAITool, len(req.Tools))
 		for i, t := range req.Tools {
@@ -178,7 +178,7 @@ func ollamaToOpenAI(req *ChatRequest) *openAIChatRequest {
 		}
 	}
 
-	// Chuyển format → response_format
+	// Convert format → response_format
 	out.ResponseFormat = ollamaFormatToOpenAI(req.Format)
 
 	return out
@@ -186,7 +186,7 @@ func ollamaToOpenAI(req *ChatRequest) *openAIChatRequest {
 
 // ─── Chat: OpenAI → Ollama (non-streaming) ────────────────────────────────────
 
-// openAIToOllamaResponse chuyển đổi non-streaming OpenAI response thành Ollama ChatResponse.
+// openAIToOllamaResponse converts a non-streaming OpenAI response into an Ollama ChatResponse.
 func openAIToOllamaResponse(model string, oai *openAIChatResponse) *ChatResponse {
 	content := ""
 	var toolCalls []ToolCall
@@ -198,7 +198,7 @@ func openAIToOllamaResponse(model string, oai *openAIChatResponse) *ChatResponse
 		if choice.FinishReason != "" {
 			finishReason = choice.FinishReason
 		}
-		// Chuyển OpenAI tool_calls (arguments là string) sang Ollama (arguments là json.RawMessage)
+		// Convert OpenAI tool_calls (arguments as strings) to Ollama (arguments as json.RawMessage)
 		if len(choice.Message.ToolCalls) > 0 {
 			toolCalls = make([]ToolCall, 0, len(choice.Message.ToolCalls))
 			for _, tc := range choice.Message.ToolCalls {
@@ -235,17 +235,17 @@ func openAIToOllamaResponse(model string, oai *openAIChatResponse) *ChatResponse
 
 // ─── Chat: OpenAI → Ollama (streaming) ────────────────────────────────────────
 
-// pendingToolCall dùng để accumulate streaming tool_call chunks theo index.
+// pendingToolCall accumulates streaming tool_call chunks by index.
 type pendingToolCall struct {
 	id        string
 	name      string
 	arguments strings.Builder
 }
 
-// streamOpenAIToOllama đọc OpenAI SSE stream từ src, chuyển đổi từng chunk sang
-// Ollama NDJSON format và ghi vào dst.
+// streamOpenAIToOllama reads an OpenAI SSE stream from src, converts each chunk to
+// Ollama NDJSON format, and writes to dst.
 //
-// Hỗ trợ: text content, tool_calls (accumulate partial chunks).
+// Supports: text content, tool_calls (accumulate partial chunks).
 //
 // OpenAI SSE format:
 //
@@ -258,11 +258,11 @@ type pendingToolCall struct {
 //	{"model":"...","created_at":"...","message":{"role":"assistant","content":""},"done":true,"done_reason":"stop"}
 func streamOpenAIToOllama(dst io.Writer, src io.Reader, model string) error {
 	scanner := bufio.NewScanner(src)
-	// Tăng buffer size để xử lý các chunk lớn
+	// Increase buffer size to handle large chunks
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 	enc := json.NewEncoder(dst)
 
-	// Map để accumulate tool_calls theo index
+	// Map to accumulate tool_calls by index
 	pendingCalls := map[int]*pendingToolCall{}
 
 	flushFn := func() {
@@ -280,7 +280,7 @@ func streamOpenAIToOllama(dst io.Writer, src io.Reader, model string) error {
 		payload := strings.TrimPrefix(line, "data: ")
 
 		if payload == "[DONE]" {
-			// Nếu còn pending tool_calls chưa emit (do không có finish_reason chunk)
+			// If there are pending tool_calls not yet emitted (due to missing finish_reason chunk)
 			if len(pendingCalls) > 0 {
 				_ = emitToolCallChunk(enc, model, pendingCalls, "tool_calls")
 				pendingCalls = map[int]*pendingToolCall{}
@@ -310,7 +310,7 @@ func streamOpenAIToOllama(dst io.Writer, src io.Reader, model string) error {
 		choice := chunk.Choices[0]
 		delta := choice.Delta
 
-		// Accumulate tool_calls nếu có
+		// Accumulate tool_calls if present
 		for _, tc := range delta.ToolCalls {
 			if pendingCalls[tc.Index] == nil {
 				pendingCalls[tc.Index] = &pendingToolCall{}
@@ -325,7 +325,7 @@ func streamOpenAIToOllama(dst io.Writer, src io.Reader, model string) error {
 			p.arguments.WriteString(tc.Function.Arguments)
 		}
 
-		// Xử lý finish_reason
+		// Handle finish_reason
 		if choice.FinishReason != nil {
 			reason := *choice.FinishReason
 			if reason == "tool_calls" && len(pendingCalls) > 0 {
@@ -337,7 +337,7 @@ func streamOpenAIToOllama(dst io.Writer, src io.Reader, model string) error {
 				flushFn()
 				continue
 			}
-			// Chunk kết thúc với content text
+			// Chunk ending with content text
 			content := delta.Content
 			resp := ChatResponse{
 				Model:      model,
@@ -353,7 +353,7 @@ func streamOpenAIToOllama(dst io.Writer, src io.Reader, model string) error {
 			continue
 		}
 
-		// Chunk thường — emit content text (bỏ qua nếu chỉ đang thu thập tool_calls)
+		// Regular chunk — emit content text (skip if only collecting tool_calls)
 		if delta.Content != "" {
 			resp := ChatResponse{
 				Model:     model,
@@ -371,7 +371,7 @@ func streamOpenAIToOllama(dst io.Writer, src io.Reader, model string) error {
 	return scanner.Err()
 }
 
-// emitToolCallChunk emit một ChatResponse với tool_calls đã được assembl từ pendingCalls.
+// emitToolCallChunk emits a ChatResponse with tool_calls assembled from pendingCalls.
 func emitToolCallChunk(enc *json.Encoder, model string, pending map[int]*pendingToolCall, reason string) error {
 	toolCalls := make([]ToolCall, 0, len(pending))
 	for i := 0; i < len(pending); i++ {
@@ -409,7 +409,7 @@ func emitToolCallChunk(enc *json.Encoder, model string, pending map[int]*pending
 
 // ─── Generate: Ollama → OpenAI ────────────────────────────────────────────────
 
-// ollamaGenerateToOpenAI chuyển đổi Ollama POST /api/generate request thành OpenAI
+// ollamaGenerateToOpenAI converts an Ollama POST /api/generate request into an OpenAI
 // POST /v1/completions request body.
 func ollamaGenerateToOpenAI(req *GenerateRequest) *openAICompletionRequest {
 	stream := true
@@ -417,7 +417,7 @@ func ollamaGenerateToOpenAI(req *GenerateRequest) *openAICompletionRequest {
 		stream = *req.Stream
 	}
 
-	// Kết hợp system prompt (nếu có) vào đầu prompt
+	// Prepend the system prompt (if any) to the beginning of the prompt
 	prompt := req.Prompt
 	if req.System != "" && !req.Raw {
 		prompt = req.System + "\n\n" + prompt
@@ -443,8 +443,8 @@ func ollamaGenerateToOpenAI(req *GenerateRequest) *openAICompletionRequest {
 
 // ─── Generate: OpenAI → Ollama (non-streaming) ────────────────────────────────
 
-// openAIToOllamaGenerate chuyển đổi non-streaming /v1/completions response thành
-// Ollama GenerateResponse.
+// openAIToOllamaGenerate converts a non-streaming /v1/completions response into
+// an Ollama GenerateResponse.
 func openAIToOllamaGenerate(model string, oai *openAICompletionResponse) *GenerateResponse {
 	text := ""
 	finishReason := "stop"
@@ -467,8 +467,8 @@ func openAIToOllamaGenerate(model string, oai *openAICompletionResponse) *Genera
 
 // ─── Generate: OpenAI → Ollama (streaming) ────────────────────────────────────
 
-// streamOpenAIGenerateToOllama đọc /v1/completions SSE stream từ src, chuyển đổi
-// từng chunk sang Ollama GenerateResponse NDJSON format và ghi vào dst.
+// streamOpenAIGenerateToOllama reads a /v1/completions SSE stream from src, converts
+// each chunk to an Ollama GenerateResponse NDJSON format, and writes to dst.
 func streamOpenAIGenerateToOllama(dst io.Writer, src io.Reader, model string) error {
 	scanner := bufio.NewScanner(src)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
@@ -537,7 +537,7 @@ func streamOpenAIGenerateToOllama(dst io.Writer, src io.Reader, model string) er
 
 // ─── Embed: Ollama → OpenAI ───────────────────────────────────────────────────
 
-// ollamaEmbedToOpenAI chuyển đổi Ollama POST /api/embed request thành OpenAI
+// ollamaEmbedToOpenAI converts an Ollama POST /api/embed request into an OpenAI
 // POST /v1/embeddings request body.
 func ollamaEmbedToOpenAI(req *EmbedRequest) *openAIEmbedRequest {
 	return &openAIEmbedRequest{
@@ -548,7 +548,7 @@ func ollamaEmbedToOpenAI(req *EmbedRequest) *openAIEmbedRequest {
 
 // ─── Embed: OpenAI → Ollama ───────────────────────────────────────────────────
 
-// openAIToOllamaEmbed chuyển đổi OpenAI /v1/embeddings response thành Ollama EmbedResponse.
+// openAIToOllamaEmbed converts an OpenAI /v1/embeddings response into an Ollama EmbedResponse.
 func openAIToOllamaEmbed(model string, oai *openAIEmbedResponse) *EmbedResponse {
 	embeddings := make([][]float64, len(oai.Data))
 	for i, d := range oai.Data {

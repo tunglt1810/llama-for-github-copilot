@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -9,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/mitchellh/mapstructure"
@@ -16,6 +18,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/viper"
 
+	"github.com/bez/llama-ollama-wrapper/internal/flags"
 	"github.com/bez/llama-ollama-wrapper/internal/proxy"
 	"github.com/bez/llama-ollama-wrapper/internal/runner"
 	"github.com/bez/llama-ollama-wrapper/internal/scanner"
@@ -54,7 +57,7 @@ func run() error {
 	}
 	switch mode {
 	case runModeWrapper:
-		// tiếp tục flow llama-server-wrapper bên dưới
+		// proceed with wrapper flow below
 	case runModeProxyOnly:
 		return runProxyOnly()
 	default:
@@ -68,9 +71,32 @@ func run() error {
 	}
 
 	// ── 3. Interactive model selection ──────────────────────────────────────────
-	modelPath, err := selector.Select(models)
+	defaults := map[string]string{}
+	if cfg.LlamaServerArgs != nil {
+		if v, ok := cfg.LlamaServerArgs[flags.Key(flags.FlagCtxPerSlot)]; ok {
+			defaults[flags.Key(flags.FlagCtxPerSlot)] = v
+		}
+		if v, ok := cfg.LlamaServerArgs[flags.Key(flags.FlagParallel)]; ok {
+			defaults[flags.Key(flags.FlagParallel)] = v
+		}
+	}
+
+	modelPath, overrides, err := selector.Select(models, defaults, os.Stdin, os.Stderr)
+	if errors.Is(err, selector.ErrDownloadRequested) {
+		fmt.Fprintln(os.Stderr, "Run: make download")
+		os.Exit(0)
+	}
 	if err != nil {
 		return fmt.Errorf("selecting model: %w", err)
+	}
+
+	if overrides != nil {
+		if cfg.LlamaServerArgs == nil {
+			cfg.LlamaServerArgs = map[string]string{}
+		}
+		for k, v := range overrides {
+			cfg.LlamaServerArgs[k] = v
+		}
 	}
 
 	// Find model size for Ollama API responses
@@ -84,17 +110,32 @@ func run() error {
 
 	// ── 4. Start llama-server ───────────────────────────────────────────────────
 	fmt.Printf("\nModel   : %s\n", filepath.Base(modelPath))
-	fmt.Printf("Server  : http://%s:%s\n", cfg.LlamaServerHost, cfg.LlamaServerPort)
+
+	// Read host/port of the llama-server from llama_server_args (breaking change)
+	var llamaHost, llamaPort string
+	if cfg.LlamaServerArgs != nil {
+		if v, ok := cfg.LlamaServerArgs[flags.Key(flags.FlagHost)]; ok {
+			llamaHost = v
+		}
+		if v, ok := cfg.LlamaServerArgs[flags.Key(flags.FlagPort)]; ok {
+			llamaPort = v
+		}
+	}
+	if llamaHost == "" || llamaPort == "" {
+		return fmt.Errorf("llama_server_args must include '%s' and '%s' when running in wrapper mode", flags.Key(flags.FlagHost), flags.Key(flags.FlagPort))
+	}
+
+	fmt.Printf("Server  : http://%s:%s\n", llamaHost, llamaPort)
 	fmt.Printf("Proxy   : http://%s:%s  (Ollama v%s)\n\n",
 		cfg.Host, cfg.Port, cfg.OllamaVersion)
 
 	// Use signal-aware context for graceful shutdown
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, os.Kill)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() {
 		<-ctx.Done()
-		if ctx.Err() != nil {
-			log.Info().Err(ctx.Err()).Msg("shutdown requested")
+		if err := ctx.Err(); err != nil {
+			log.Info().Err(err).Msg("shutdown requested")
 		} else {
 			log.Info().Msg("shutdown requested")
 		}
@@ -102,34 +143,36 @@ func run() error {
 
 	log.Info().Str("model", filepath.Base(modelPath)).Msg("starting llama-server")
 	r, err := runner.Start(ctx, modelPath, runner.Config{
-		Host: cfg.LlamaServerHost,
-		Port: cfg.LlamaServerPort,
+		Host: llamaHost,
+		Port: llamaPort,
 		Args: cfg.LlamaServerArgs,
 	})
 	if err != nil {
 		return fmt.Errorf("starting llama-server: %w", err)
 	}
-	defer func() {
-		if stopErr := r.Stop(); stopErr != nil {
-			log.Error().Err(stopErr).Msg("stopping llama-server")
-		}
-	}()
+
+	var stopOnce sync.Once
+	stopRunner := func() {
+		stopOnce.Do(func() {
+			if r == nil {
+				return
+			}
+			if stopErr := r.Stop(); stopErr != nil {
+				log.Error().Err(stopErr).Msg("stopping llama-server")
+			}
+		})
+	}
+	defer stopRunner()
 
 	// Ensure we attempt to stop llama-server as soon as a shutdown signal is received.
 	go func() {
 		<-ctx.Done()
-		if r != nil {
-			if stopErr := r.Stop(); stopErr != nil {
-				log.Error().Err(stopErr).Msg("stopping llama-server on shutdown signal")
-			}
-		}
+		stopRunner()
 	}()
 
 	log.Info().Msg("Waiting for llama-server to become ready...")
 	if err := r.WaitReady(ctx); err != nil {
-		if stopErr := r.Stop(); stopErr != nil {
-			log.Error().Err(stopErr).Msg("stopping llama-server after failed readiness")
-		}
+		stopRunner()
 		return fmt.Errorf("llama-server never became ready: %w", err)
 	}
 	log.Info().Msg("llama-server is ready")
@@ -141,7 +184,7 @@ func run() error {
 		ModelName:    r.ModelName(),
 		ModelSize:    modelSize,
 		UpstreamBase: r.BaseURL(),
-	})
+	}, r.CtxSize())
 	if err != nil {
 		return fmt.Errorf("creating proxy server: %w", err)
 	}
@@ -181,15 +224,15 @@ func run() error {
 	return nil
 }
 
-// runProxyOnly khởi động proxy kết nối thẳng vào llama-server đang chạy sẵn.
-// Cấu hình được đọc từ config/proxy.yaml và có thể ghi đè bằng environment variables.
-// Các biến env tương thích:
+// runProxyOnly starts the proxy that forwards to an already-running llama-server.
+// Configuration is read from config/proxy.yaml and can be overridden via environment variables.
+// Compatible environment variables:
 //
-//	LLAMA_SERVER_URL hoặc LLAMA_UPSTREAM_BASE  — base URL của llama-server
-//	LLAMA_MODEL_NAME                         — tên model quảng bá qua Ollama API
-//	LLAMA_MODEL_SIZE                         — kích thước model tính bằng bytes, mặc định 0
-//	LLAMA_PROXY_HOST                         — địa chỉ bind của proxy, mặc định 127.0.0.1
-//	LLAMA_PROXY_PORT                         — port của proxy, mặc định 11434
+//	LLAMA_SERVER_URL or LLAMA_UPSTREAM_BASE — base URL of the llama-server
+//	LLAMA_MODEL_NAME                        — model name to advertise via the Ollama API
+//	LLAMA_MODEL_SIZE                        — model size in bytes, default 0
+//	LLAMA_PROXY_HOST                        — proxy bind address, default 127.0.0.1
+//	LLAMA_PROXY_PORT                        — proxy bind port, default 11434
 func runProxyOnly() error {
 	projectRoot, _ := findProjectRoot()
 	cfg, err := loadProxyConfig(projectRoot)
@@ -228,7 +271,6 @@ func runProxyOnly() error {
 		proxyPort = proxy.OllamaProxyPort
 	}
 
-	cfg.UpstreamBase = cfg.UpstreamBase
 	cfg.ModelName = modelName
 
 	fmt.Printf("\nMode    : %s\n", runModeProxyOnly)
@@ -249,7 +291,7 @@ func runProxyOnly() error {
 		ModelName:    modelName,
 		ModelSize:    modelSize,
 		UpstreamBase: serverURL,
-	})
+	}, resolveContextLength(cfg))
 	if err != nil {
 		return fmt.Errorf("creating proxy server: %w", err)
 	}
@@ -263,10 +305,6 @@ func runProxyOnly() error {
 	return nil
 }
 
-// findProjectRoot walks up from the executable's directory to find the
-// project root (the directory containing go.mod).
-// When running via `go run` the executable is in a temp dir, so we fall back
-// to the current working directory.
 func loadProxyConfig(projectRoot string) (proxy.Config, error) {
 	cfg := proxy.Config{
 		Host:          proxy.OllamaProxyHost,
@@ -281,8 +319,9 @@ func loadProxyConfig(projectRoot string) (proxy.Config, error) {
 	v.SetDefault("PORT", cfg.Port)
 	v.SetDefault("RUN_MODE", runModeWrapper)
 	v.SetDefault("MODEL_SIZE", cfg.ModelSize)
-	v.SetDefault("LLAMA_SERVER_HOST", "127.0.0.1")
-	v.SetDefault("LLAMA_SERVER_PORT", "18888")
+	// Breaking change: host/port for llama-server are now nested under llama_server_args
+	v.SetDefault("LLAMA_SERVER_ARGS__"+flags.Key(flags.FlagHost), "127.0.0.1")
+	v.SetDefault("LLAMA_SERVER_ARGS__"+flags.Key(flags.FlagPort), "18888")
 	v.SetDefault("OLLAMA_VERSION", cfg.OllamaVersion)
 
 	v.SetConfigName("proxy")
@@ -306,11 +345,29 @@ func loadProxyConfig(projectRoot string) (proxy.Config, error) {
 		mapstructure.ComposeDecodeHookFunc(
 			mapstructure.StringToTimeDurationHookFunc(),
 		),
-	)); err != nil { // Handle errors reading the config file
-		panic(fmt.Errorf("fatal error config file: %s", err))
+	)); err != nil {
+		return cfg, fmt.Errorf("parsing proxy config: %w", err)
 	}
 
 	return cfg, nil
+}
+
+func resolveContextLength(cfg proxy.Config) int {
+	if cfg.LlamaServerArgs != nil {
+		// Prefer explicit ctx-size if provided
+		if raw, ok := cfg.LlamaServerArgs[flags.Key(flags.FlagCtxSize)]; ok {
+			if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+				return v
+			}
+		}
+		// Fallback to ctx-per-slot (not multiplied by parallel here)
+		if raw, ok := cfg.LlamaServerArgs[flags.Key(flags.FlagCtxPerSlot)]; ok {
+			if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+				return v
+			}
+		}
+	}
+	return 0
 }
 
 func findProjectRoot() (string, error) {
@@ -356,11 +413,11 @@ func findGoMod(start string) (string, bool) {
 
 func isTempPath(path string) bool {
 	tmp := os.TempDir()
-	if len(path) >= len(tmp) && path[:len(tmp)] == tmp {
+	if strings.HasPrefix(path, tmp) {
 		return true
 	}
 	// macOS specific
-	if runtime.GOOS == "darwin" && len(path) > 4 && path[:5] == "/var/" {
+	if runtime.GOOS == "darwin" && strings.HasPrefix(path, "/var/") {
 		return true
 	}
 	return false

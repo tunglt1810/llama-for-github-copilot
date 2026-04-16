@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/labstack/echo/v5"
@@ -24,12 +23,10 @@ type handlers struct {
 	upstreamBase  string
 	reverseProxy  *httputil.ReverseProxy
 	ollamaVersion string
+	contextSize   int
 }
 
-// echoHandler adapts an *echo.Context handler to echo.HandlerFunc.
-type echoHandler = func(c *echo.Context) error
-
-func newHandlers(modelName string, modelSize int64, upstreamBase string, ollamaVersion string) (*handlers, error) {
+func newHandlers(modelName string, modelSize int64, upstreamBase string, ollamaVersion string, contextSize int) (*handlers, error) {
 	target, err := url.Parse(upstreamBase)
 	if err != nil {
 		return nil, fmt.Errorf("parsing upstream URL: %w", err)
@@ -48,6 +45,7 @@ func newHandlers(modelName string, modelSize int64, upstreamBase string, ollamaV
 		upstreamBase:  upstreamBase,
 		reverseProxy:  rp,
 		ollamaVersion: ollamaVersion,
+		contextSize:   contextSize,
 	}, nil
 }
 
@@ -97,12 +95,13 @@ func (h *handlers) show(c *echo.Context) error {
 
 	resp := ShowResponse{
 		License:      "",
-		Modelfile:    fmt.Sprintf("FROM %s\nTEMPLATE \"%s\"\nPARAMETER num_ctx %d\n", h.modelName, showTemplate, h.contextLength()),
-		Parameters:   fmt.Sprintf("num_ctx                        %d\nstop                           \"<|start_header_id|>\"\nstop                           \"<|end_header_id|>\"\nstop                           \"<|eot_id|>\"\n", h.contextLength()),
+		Modelfile:    fmt.Sprintf("FROM \"%s\"\nPARAMETER num_ctx %d\n", h.modelName, h.contextLength()),
+		Parameters:   "stop                           \"<|start_header_id|>\"\nstop                           \"<|end_header_id|>\"\nstop                           \"<|eot_id|>\"\n",
 		Template:     showTemplate,
 		Details:      h.modelDetails(),
 		ModifiedAt:   time.Now(),
 		Capabilities: h.showCapabilities(),
+		ModelInfo:    h.modelInfo(),
 	}
 
 	if req.Verbose {
@@ -249,15 +248,14 @@ func (h *handlers) modelDetails() ModelDetails {
 }
 
 func (h *handlers) contextLength() int {
+	if h.contextSize > 0 {
+		return h.contextSize
+	}
 	return 262144
 }
 
 func (h *handlers) showCapabilities() []string {
-	caps := []string{"completion", "chat"}
-	lowerName := strings.ToLower(h.modelName)
-	if strings.Contains(lowerName, "llava") || strings.Contains(lowerName, "vision") || strings.Contains(lowerName, "image") {
-		caps = append(caps, "vision")
-	}
+	caps := []string{"completion", "chat", "tools", "vision"}
 	return caps
 }
 
@@ -266,6 +264,7 @@ func (h *handlers) modelInfo() map[string]any {
 		"general.architecture":         "llama",
 		"general.file_type":            2,
 		"general.quantization_version": 2,
+		"general.context_length":       h.contextLength(),
 		"llama.context_length":         h.contextLength(),
 		"tokenizer.ggml.model":         "gpt2",
 		"tokenizer.ggml.pre":           "llama-bpe",

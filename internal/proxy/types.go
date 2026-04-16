@@ -2,16 +2,16 @@
 // to a running llama-server instance (OpenAI-compatible API).
 //
 // Supported endpoints (Ollama API v0.20.7):
-//
-//	GET  /api/version              → {"version":"0.20.7"}
-//	GET  /api/tags                 → danh sách models (Ollama format)
-//	GET  /api/ps                   → models đang chạy
-//	POST /api/chat                 → translate Ollama→OpenAI, proxy, translate back
-//	POST /api/generate             → translate Ollama→OpenAI /v1/completions, proxy, translate back
-//	POST /api/embed                → translate Ollama→OpenAI /v1/embeddings, proxy, translate back
-//	POST /api/show                 → model metadata
-//	GET  /v1/models                → served locally
-//	ANY  /v1/*                     → pass-through to llama-server
+
+// GET  /api/version              → {"version":"0.20.7"}
+// GET  /api/tags                 → list of models (Ollama format)
+// GET  /api/ps                   → running models
+// POST /api/chat                 → translate Ollama→OpenAI, proxy, translate back
+// POST /api/generate             → translate Ollama→OpenAI /v1/completions, proxy, translate back
+// POST /api/embed                → translate Ollama→OpenAI /v1/embeddings, proxy, translate back
+// POST /api/show                 → model metadata
+// GET  /v1/models                → served locally
+// ANY  /v1/*                     → pass-through to llama-server
 package proxy
 
 import (
@@ -21,8 +21,8 @@ import (
 
 // ─── Ollama version ──────────────────────────────────────────────────────────
 
-// OllamaVersion phải khớp với phiên bản Ollama mà client (GitHub Copilot, Continue.dev, v.v.)
-// yêu cầu tối thiểu để enable integration.
+// OllamaVersion must match the minimum Ollama version required by clients
+// (GitHub Copilot, Continue.dev, etc.) to enable integration.
 const OllamaVersion = "0.20.7"
 
 type VersionResponse struct {
@@ -84,51 +84,51 @@ type ShowResponse struct {
 	Details      ModelDetails        `json:"details"`
 	ModelInfo    map[string]any      `json:"model_info,omitempty"`
 	ModifiedAt   time.Time           `json:"modified_at"`
-	// Capabilities liệt kê khả năng của model; GitHub Copilot filter dựa trên field này.
-	// Phải có ít nhất "completion" để Copilot hiển thị model trong danh sách.
+	// Capabilities lists the model's capabilities; GitHub Copilot filters based on this field.
+	// The field must include at least "completion" for Copilot to display the model in lists.
 	Capabilities []string            `json:"capabilities"`
 }
 
 // ─── Tool types (Ollama) ──────────────────────────────────────────────────────
 
-// ToolFunction mô tả function trong một Tool.
+// ToolFunction describes a function inside a Tool.
 type ToolFunction struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
 }
 
-// Tool biểu diễn một tool (function) gửi từ client đến /api/chat.
+// Tool represents a tool (function) sent by the client to /api/chat.
 type Tool struct {
 	Type     string       `json:"type"`
 	Function ToolFunction `json:"function"`
 }
 
-// ToolCallFunction là kết quả function call từ model.
+// ToolCallFunction is the result of a function call from the model.
 type ToolCallFunction struct {
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments"`
 }
 
-// ToolCall biểu diễn một lần model gọi tool.
+// ToolCall represents a single tool call from the model.
 type ToolCall struct {
 	Function ToolCallFunction `json:"function"`
 }
 
 // ─── Ollama chat (POST /api/chat) ─────────────────────────────────────────────
 
-// OllamaMessage là một message trong chat history.
+// OllamaMessage is a message in the chat history.
 type OllamaMessage struct {
 	Role string `json:"role"`
-	// Content là nội dung text của message.
+	// Content is the text content of the message.
 	Content string `json:"content"`
-	// Images là danh sách ảnh base64-encoded (dành cho multimodal models như llava).
+	// Images is a list of base64-encoded images (for multimodal models like llava).
 	Images []string `json:"images,omitempty"`
-	// ToolCalls là danh sách tool calls mà model muốn thực hiện.
+	// ToolCalls is the list of tool calls the model wants to perform.
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-	// ToolName là tên tool đã được thực thi (dùng cho role: "tool").
+	// ToolName is the name of the executed tool (used for role: "tool").
 	ToolName string `json:"tool_name,omitempty"`
-	// Thinking là nội dung "thinking" của model (cho các thinking models như deepseek-r1).
+	// Thinking is the model's "thinking" content (for thinking models like deepseek-r1).
 	Thinking string `json:"thinking,omitempty"`
 }
 
@@ -144,26 +144,26 @@ type ChatOptions struct {
 type ChatRequest struct {
 	Model    string          `json:"model"`
 	Messages []OllamaMessage `json:"messages"`
-	Stream   *bool           `json:"stream,omitempty"` // nil nghĩa là mặc định (true)
+	Stream   *bool           `json:"stream,omitempty"` // nil means default (true)
 	Options  *ChatOptions    `json:"options,omitempty"`
-	// Tools là danh sách tools mà model có thể sử dụng (function calling).
+	// Tools is the list of tools that the model can use (function calling).
 	Tools []Tool `json:"tools,omitempty"`
-	// Format là định dạng output: "json" hoặc JSON schema object cho structured outputs.
+	// Format is the output format: "json" or a JSON schema object for structured outputs.
 	Format json.RawMessage `json:"format,omitempty"`
-	// KeepAlive kiểm soát thời gian model giữ trong memory (mặc định "5m").
+	// KeepAlive controls how long the model is kept in memory (default "5m").
 	KeepAlive json.RawMessage `json:"keep_alive,omitempty"`
-	// Think cho phép model "suy nghĩ" trước khi trả lời (dành cho thinking models).
+	// Think allows the model to "think" before responding (for thinking models).
 	Think *bool `json:"think,omitempty"`
 }
 
-// ChatResponse là một dòng NDJSON trong streaming hoặc body đầy đủ khi không streaming.
+// ChatResponse is an NDJSON line when streaming, or a full body when not streaming.
 type ChatResponse struct {
 	Model     string        `json:"model"`
 	CreatedAt time.Time     `json:"created_at"`
 	Message   OllamaMessage `json:"message"`
 	Done      bool          `json:"done"`
 
-	// Các field dưới đây chỉ có trong chunk cuối cùng (done: true)
+	// The fields below are only present in the final chunk (done: true)
 	DoneReason         string `json:"done_reason,omitempty"`
 	TotalDuration      int64  `json:"total_duration,omitempty"`
 	LoadDuration       int64  `json:"load_duration,omitempty"`
@@ -175,7 +175,7 @@ type ChatResponse struct {
 
 // ─── Ollama generate (POST /api/generate) ────────────────────────────────────
 
-// GenerateRequest là request body cho POST /api/generate (text completion đơn lượt).
+// GenerateRequest is the request body for POST /api/generate (single-turn text completion).
 type GenerateRequest struct {
 	Model    string          `json:"model"`
 	Prompt   string          `json:"prompt"`
@@ -186,24 +186,24 @@ type GenerateRequest struct {
 	Stream   *bool           `json:"stream,omitempty"`
 	Raw      bool            `json:"raw,omitempty"`
 	Format   json.RawMessage `json:"format,omitempty"`
-	// KeepAlive kiểm soát thời gian model giữ trong memory.
+	// KeepAlive controls how long the model is kept in memory.
 	KeepAlive json.RawMessage `json:"keep_alive,omitempty"`
-	// Think cho phép model "suy nghĩ" trước khi trả lời.
+	// Think allows the model to "think" before responding.
 	Think   *bool        `json:"think,omitempty"`
 	Options *ChatOptions `json:"options,omitempty"`
 }
 
-// GenerateResponse là một dòng NDJSON khi streaming hoặc body đầy đủ khi không streaming.
+// GenerateResponse is an NDJSON line when streaming or a full body when not streaming.
 type GenerateResponse struct {
 	Model     string    `json:"model"`
 	CreatedAt time.Time `json:"created_at"`
 	Response  string    `json:"response"`
 	Done      bool      `json:"done"`
 
-	// Thinking là nội dung "thinking" của model (cho thinking models).
+	// Thinking is the model's "thinking" content (for thinking models).
 	Thinking string `json:"thinking,omitempty"`
 
-	// Các field dưới đây chỉ có trong response cuối (done: true)
+	// The fields below are only present in the final response (done: true)
 	DoneReason         string `json:"done_reason,omitempty"`
 	Context            []int  `json:"context,omitempty"`
 	TotalDuration      int64  `json:"total_duration,omitempty"`
@@ -216,18 +216,18 @@ type GenerateResponse struct {
 
 // ─── Ollama embed (POST /api/embed) ──────────────────────────────────────────
 
-// EmbedRequest là request body cho POST /api/embed.
-// Input có thể là một string hoặc []string — dùng json.RawMessage để handle cả hai.
+// EmbedRequest is the request body for POST /api/embed.
+// Input can be a string or []string — json.RawMessage is used to handle both.
 type EmbedRequest struct {
 	Model    string          `json:"model"`
 	Input    json.RawMessage `json:"input"`
 	Truncate *bool           `json:"truncate,omitempty"`
-	// KeepAlive kiểm soát thời gian model giữ trong memory.
+	// KeepAlive controls how long the model is kept in memory.
 	KeepAlive json.RawMessage `json:"keep_alive,omitempty"`
 	Options   *ChatOptions    `json:"options,omitempty"`
 }
 
-// EmbedResponse là response cho POST /api/embed.
+// EmbedResponse is the response for POST /api/embed.
 type EmbedResponse struct {
 	Model           string      `json:"model"`
 	Embeddings      [][]float64 `json:"embeddings"`
@@ -236,22 +236,22 @@ type EmbedResponse struct {
 	PromptEvalCount int         `json:"prompt_eval_count,omitempty"`
 }
 
-// ─── OpenAI internal types (dùng bởi translate.go) ───────────────────────────
+// ─── OpenAI internal types (used by translate.go) ───────────────────────────
 
-// openAIResponseFormat dùng cho structured outputs và JSON mode.
+// openAIResponseFormat is used for structured outputs and JSON mode.
 type openAIResponseFormat struct {
 	Type   string          `json:"type"`
 	Schema json.RawMessage `json:"json_schema,omitempty"`
 }
 
-// openAIToolFunction mô tả function trong openAITool.
+// openAIToolFunction describes a function in an openAITool.
 type openAIToolFunction struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
 }
 
-// openAITool là OpenAI tool format.
+// openAITool is the OpenAI tool format.
 type openAITool struct {
 	Type     string             `json:"type"`
 	Function openAIToolFunction `json:"function"`
@@ -260,25 +260,25 @@ type openAITool struct {
 // openAIToolCallFunction là function call result từ model.
 type openAIToolCallFunction struct {
 	Name string `json:"name"`
-	// Arguments là JSON-encoded string (khác với Ollama dùng json.RawMessage object).
+	// Arguments is a JSON-encoded string (unlike Ollama which uses json.RawMessage).
 	Arguments string `json:"arguments"`
 }
 
-// openAIToolCall biểu diễn một tool call từ model.
+// openAIToolCall represents a tool call from the model.
 type openAIToolCall struct {
 	ID       string                 `json:"id,omitempty"`
 	Type     string                 `json:"type,omitempty"`
 	Function openAIToolCallFunction `json:"function"`
 }
 
-// openAIMessage là một message trong OpenAI chat format.
-// Content dùng json.RawMessage để hỗ trợ cả string thường và content array (multimodal).
+// openAIMessage is a message in the OpenAI chat format.
+// Content uses json.RawMessage to support both plain strings and content arrays (multimodal).
 type openAIMessage struct {
 	Role       string           `json:"role"`
 	Content    json.RawMessage  `json:"content,omitempty"`
 	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string           `json:"tool_call_id,omitempty"`
-	// Name là tên tool cho role "tool" messages.
+	// Name is the tool name for role "tool" messages.
 	Name string `json:"name,omitempty"`
 }
 
@@ -294,7 +294,7 @@ type openAIChatRequest struct {
 	ResponseFormat *openAIResponseFormat `json:"response_format,omitempty"`
 }
 
-// openAIStreamChunk là SSE data payload từ OpenAI streaming API.
+// openAIStreamChunk is the SSE data payload from the OpenAI streaming API.
 type openAIStreamChunk struct {
 	ID      string `json:"id"`
 	Object  string `json:"object"`
@@ -305,7 +305,7 @@ type openAIStreamChunk struct {
 		Delta struct {
 			Role    string `json:"role,omitempty"`
 			Content string `json:"content,omitempty"`
-			// ToolCalls trong streaming được gửi từng phần — cần accumulate theo index.
+			// ToolCalls in streaming are sent in parts — they need to be accumulated by index.
 			ToolCalls []struct {
 				Index    int    `json:"index"`
 				ID       string `json:"id,omitempty"`
@@ -325,7 +325,7 @@ type openAIStreamChunk struct {
 	} `json:"usage,omitempty"`
 }
 
-// openAIChatResponse là non-streaming OpenAI response.
+// openAIChatResponse is a non-streaming OpenAI response.
 type openAIChatResponse struct {
 	ID      string `json:"id"`
 	Object  string `json:"object"`
@@ -343,9 +343,9 @@ type openAIChatResponse struct {
 	} `json:"usage"`
 }
 
-// ─── OpenAI Completions internal types (dùng cho /api/generate) ──────────────
+// ─── OpenAI Completions internal types (used for /api/generate) ──────────────
 
-// openAICompletionRequest là request body cho OpenAI /v1/completions.
+// openAICompletionRequest is the request body for OpenAI /v1/completions.
 type openAICompletionRequest struct {
 	Model          string                `json:"model"`
 	Prompt         string                `json:"prompt"`
@@ -358,7 +358,7 @@ type openAICompletionRequest struct {
 	ResponseFormat *openAIResponseFormat `json:"response_format,omitempty"`
 }
 
-// openAICompletionResponse là non-streaming /v1/completions response.
+// openAICompletionResponse is a non-streaming /v1/completions response.
 type openAICompletionResponse struct {
 	ID      string `json:"id"`
 	Object  string `json:"object"`
@@ -376,7 +376,7 @@ type openAICompletionResponse struct {
 	} `json:"usage"`
 }
 
-// openAICompletionStreamChunk là streaming chunk từ /v1/completions.
+// openAICompletionStreamChunk is a streaming chunk from /v1/completions.
 type openAICompletionStreamChunk struct {
 	ID      string `json:"id"`
 	Object  string `json:"object"`
@@ -389,15 +389,15 @@ type openAICompletionStreamChunk struct {
 	} `json:"choices"`
 }
 
-// ─── OpenAI Embeddings internal types (dùng cho /api/embed) ──────────────────
+// ─── OpenAI Embeddings internal types (used for /api/embed) ──────────────────
 
-// openAIEmbedRequest là request body cho OpenAI /v1/embeddings.
+// openAIEmbedRequest is the request body for OpenAI /v1/embeddings.
 type openAIEmbedRequest struct {
 	Model string          `json:"model"`
 	Input json.RawMessage `json:"input"`
 }
 
-// openAIEmbedResponse là response từ OpenAI /v1/embeddings.
+// openAIEmbedResponse is the response from OpenAI /v1/embeddings.
 type openAIEmbedResponse struct {
 	Object string `json:"object"`
 	Data   []struct {

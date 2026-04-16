@@ -11,11 +11,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/bez/llama-ollama-wrapper/internal/flags"
 	"github.com/rs/zerolog/log"
 )
 
@@ -39,6 +42,7 @@ type Runner struct {
 	baseURL   string
 	waitErr   error
 	waitDone  chan struct{}
+	ctxSize   int
 }
 
 // Start launches llama-server with the given GGUF model file.
@@ -61,7 +65,7 @@ func Start(ctx context.Context, modelPath string, cfg Config) (*Runner, error) {
 	}
 	baseURL := fmt.Sprintf("http://%s:%s", host, port)
 
-	args := buildArgs(modelPath, modelName, host, port, cfg.Args)
+	args, ctxSize := buildArgs(modelPath, modelName, host, port, cfg.Args)
 
 	cmd := exec.Command("llama-server", args...)
 	cmd.Stdout = os.Stdout
@@ -73,7 +77,7 @@ func Start(ctx context.Context, modelPath string, cfg Config) (*Runner, error) {
 		return nil, fmt.Errorf("starting llama-server: %w", err)
 	}
 
-	runner := &Runner{cmd: cmd, modelName: modelName, baseURL: baseURL, waitDone: make(chan struct{})}
+	runner := &Runner{cmd: cmd, modelName: modelName, baseURL: baseURL, waitDone: make(chan struct{}), ctxSize: ctxSize}
 	go func() {
 		runner.waitErr = cmd.Wait()
 		close(runner.waitDone)
@@ -82,23 +86,24 @@ func Start(ctx context.Context, modelPath string, cfg Config) (*Runner, error) {
 	return runner, nil
 }
 
-func buildArgs(modelPath, modelName, host, port string, overrides map[string]string) []string {
+func buildArgs(modelPath, modelName, host, port string, overrides map[string]string) ([]string, int) {
 	defaults := []struct {
 		key   string
 		value string
 	}{
-		{"model", modelPath},
-		{"alias", modelName},
-		{"n-gpu-layers", "99"},
-		{"ctx-size", "262144"},
-		{"parallel", "1"},
-		{"cache-type-k", "q8_0"},
-		{"cache-type-v", "q8_0"},
-		{"flash-attn", "auto"},
-		{"embedding", "true"},
-		{"host", host},
-		{"port", port},
+		{flags.Key(flags.FlagModel), modelPath},
+		{flags.Key(flags.FlagAlias), modelName},
+		{flags.Key(flags.FlagNgpuLayers), "99"},
+		{flags.Key(flags.FlagCtxSize), "262144"},
+		{flags.Key(flags.FlagParallel), "1"},
+		{flags.Key(flags.FlagCacheTypeK), "q8_0"},
+		{flags.Key(flags.FlagCacheTypeV), "q8_0"},
+		{flags.Key(flags.FlagFlashAttn), "auto"},
+		{flags.Key(flags.FlagEmbedding), "true"},
+		{flags.Key(flags.FlagHost), host},
+		{flags.Key(flags.FlagPort), port},
 	}
+	finalCtxSize := 262144
 
 	storage := make(map[string]string, len(defaults)+len(overrides))
 	for _, item := range defaults {
@@ -106,7 +111,7 @@ func buildArgs(modelPath, modelName, host, port string, overrides map[string]str
 	}
 	for k, v := range overrides {
 		switch k {
-		case "model", "alias", "host", "port":
+		case flags.Key(flags.FlagModel), flags.Key(flags.FlagAlias), flags.Key(flags.FlagHost), flags.Key(flags.FlagPort):
 			continue
 		default:
 			storage[k] = v
@@ -121,16 +126,46 @@ func buildArgs(modelPath, modelName, host, port string, overrides map[string]str
 	// Add any extra custom args not present in defaults in deterministic order.
 	extraKeys := make([]string, 0, len(storage))
 	for k := range storage {
-		if !containsKey(defaults, k) {
+		if !containsKey(defaults, k) && k != flags.Key(flags.FlagCtxPerSlot) {
 			extraKeys = append(extraKeys, k)
 		}
 	}
+	// handle calculation of the ctx-size parameter
+	if ctxPerSlot, ok := overrides[flags.Key(flags.FlagCtxPerSlot)]; ok {
+		if parallel, ok := storage[flags.Key(flags.FlagParallel)]; ok {
+			ctxPerSlotInt, err1 := strconv.Atoi(ctxPerSlot)
+			parallelInt, err2 := strconv.Atoi(parallel)
+			if err1 == nil && err2 == nil {
+				finalCtxSize = ctxPerSlotInt
+				storage[flags.Key(flags.FlagCtxSize)] = fmt.Sprintf("%d", ctxPerSlotInt*parallelInt)
+				i := slices.Index(arguments, "--"+flags.Key(flags.FlagCtxSize))
+				if i >= 0 && i+1 < len(arguments) {
+					arguments[i+1] = storage[flags.Key(flags.FlagCtxSize)]
+				}
+				log.Info().Msgf("calculated ctx-size=%s from ctx-per-slot=%s and parallel=%s", storage[flags.Key(flags.FlagCtxSize)], ctxPerSlot, parallel)
+				delete(storage, flags.Key(flags.FlagCtxPerSlot))
+				// Remove ctx-per-slot from extraKeys if it exists
+			}
+		}
+	}
+
+	// After all modifications, parse final ctx-size to return as int.
+	if totalCtxSize, ok1 := storage[flags.Key(flags.FlagCtxSize)]; ok1 {
+		if parallelSlot, ok2 := storage[flags.Key(flags.FlagParallel)]; ok2 {
+			if totalCtxSizeInt, err1 := strconv.Atoi(totalCtxSize); err1 == nil {
+				if parallelSlotInt, err2 := strconv.Atoi(parallelSlot); err2 == nil && parallelSlotInt > 0 {
+					finalCtxSize = totalCtxSizeInt / parallelSlotInt
+				}
+			}
+		}
+	}
+
 	sort.Strings(extraKeys)
 	for _, k := range extraKeys {
 		appendArg(&arguments, k, storage[k])
 	}
 
-	return arguments
+	return arguments, finalCtxSize
 }
 
 func containsKey(defaults []struct{ key, value string }, key string) bool {
@@ -163,6 +198,15 @@ func (r *Runner) BaseURL() string {
 		return fmt.Sprintf("http://%s:%s", defaultLlamaServerHost, defaultLlamaServerPort)
 	}
 	return r.baseURL
+}
+
+// CtxSize returns the final ctx-size used to start llama-server.
+// If unknown, returns the default 262144.
+func (r *Runner) CtxSize() int {
+	if r == nil || r.ctxSize == 0 {
+		return 262144
+	}
+	return r.ctxSize
 }
 
 // Stop terminates the llama-server process if it is still running.

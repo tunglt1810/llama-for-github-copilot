@@ -6,7 +6,9 @@
 			"type": "shell",
 			"command": "pkill -SIGINT llama-server; while pgrep -x llama-server > /dev/null; do sleep 0.5; done",
 			"presentation": {
-				"reveal": "silent"
+				"reveal": "silent",
+				"close": true,
+				"showReuseMessage": false
 			}
 		}
 	]

@@ -24,6 +24,10 @@ build:  ## Build the llama-proxy Go binary → bin/llama-proxy
 run: build  ## Build & run llama-proxy (selects model interactively, starts Ollama proxy on :11434)
 	@$(BIN_DIR)/llama-proxy
 
+# Start llama-wrapper in foreground with sensible defaults from .vscode/launch.json
+start: build  ## Start llama-wrapper (foreground)
+	@PORT=11434 RUN_MODE=llama-server-wrapper UPSTREAM_BASE="http://127.0.0.1:50000" LLAMA_SERVER_ARGS__HOST="127.0.0.1" LLAMA_SERVER_ARGS__PORT="50000" $(BIN_DIR)/llama-proxy
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Installation
 # ─────────────────────────────────────────────────────────────────────────────

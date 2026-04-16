@@ -104,20 +104,20 @@ select_model() {
 
 COMMON_FLAGS=(
   --n-gpu-layers 99        # load all layers onto Metal GPU
-  --ctx-size 65536         # 16K context per slot * 4 slots = 65536 total context
-  --parallel 4             # 4 slots × 16K ctx × q8_0 KV ≈ 1.9 GB; model ≈ 9.5 GB → ~11.4 GB total (fits 24 GB Metal)
-  --cache-type-k q8_0      # quantised KV cache: halves KV memory, negligible quality loss
-  --cache-type-v q8_0
+  --ctx-size 786432        # context window = ctx-size / parallel; 786432 / 3 ≈ 256K context window
+  --parallel 3             # 4 slots × 16K ctx × q8_0 KV ≈ 1.9 GB; model ≈ 9.5 GB → ~11.4 GB total (fits 24 GB Metal)
+  --cache-type-k q4_0      # quantised KV cache: halves KV memory, negligible quality loss
+  --cache-type-v q4_0
   --flash-attn auto        # auto-detect Flash Attention support
   --embedding
   --host 127.0.0.1
-  --port 18888
+  --port 50000
 )
 
 MODEL_FILE=$(select_model)
 MODEL_NAME=$(basename "$MODEL_FILE" .gguf)
 
 echo "Model   : $MODEL_NAME"
-echo "Endpoint: http://127.0.0.1:18888"
+echo "Endpoint: http://127.0.0.1:50000"
 echo ""
 exec llama-server --model "$MODEL_FILE" --alias "$MODEL_NAME" "${COMMON_FLAGS[@]}"

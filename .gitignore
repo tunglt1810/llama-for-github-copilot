@@ -4,3 +4,5 @@ models
 .env
 bin/
 vendor/
+
+.github/copilot-instructions.md
